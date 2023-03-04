@@ -44,6 +44,7 @@ int numJuniors = 0;
 int numSeniors = 0;
 int numProfessors = 0;
 int groupsServed = 0;
+int cleanBarSeats = 32;
 enum state
 {
     offline = 1,
@@ -73,7 +74,6 @@ typedef struct group
     int group_id;
     int size;
     int type;
-    struct timespec64 time_sat;
     struct list_head list;
 } Group;
 
@@ -82,6 +82,7 @@ typedef struct
     bool occupied; // true open and false for occupied
     int type;
     bool clean;
+    struct timespec64 time_sat;
 } seat;
 
 typedef struct
@@ -106,6 +107,7 @@ struct thread_parameter
 {
     int id;
     struct task_struct *kthread;
+    struct mutex mutex;
 };
 
 struct thread_parameter thread1;
@@ -117,11 +119,14 @@ void loadGroup(void)
 {
     // list_del_head
 
-    struct list_head *temp;
-    Group *g;
+    struct list_head temp;
+    struct list_head move_list;
+    Group *g = NULL;
+    struct timespec64 currTrime;
     int i, start, j;
+    ktime_get_real_ts64(&currTrime);
 
-    g = list_entry(temp, Group, list);
+    g = list_first_entry(&Bar.queue, Group, list);
 
     for (i = 0; i < 4; i++)
     {
@@ -136,33 +141,207 @@ void loadGroup(void)
             Waiter.state = 3;
 
             start = 8 - Bar.tables[i].cleanSeats;
-            for (j = start; j < 8; j++)
+            for (j = start; j < start + g->size; j++)
             {
                 Bar.tables[i].seats[j].type = g->type;
                 Bar.tables[i].seats[j].occupied = true;
                 Bar.tables[i].seats[j].clean = false;
+                Bar.tables[i].seats[j].time_sat = currTrime;
                 Bar.tables[i].cleanSeats--;
+                cleanBarSeats--;
+            }
+            i = 5;
+        }
+    }
+
+    grpWaiting--;
+    custWaiting -= g->size;
+    currOcup += g->size;
+    switch (g->type)
+    {
+    case 0:
+        numFreshman += g->size;
+        break;
+    case 1:
+        numSophomores += g->size;
+        break;
+    case 2:
+        numJuniors += g->size;
+        break;
+    case 3:
+        numSeniors += g->size;
+        break;
+    case 4:
+        numProfessors += g->size;
+        break;
+    }
+
+    list_del(&g->list); /* removes entry from list */
+    kfree(g);
+}
+
+void removeGroup(void)
+{
+
+    int i;
+    int currTable = Waiter.currTable;
+    time64_t drinkingTime;
+    struct timespec64 currTime;
+    bool unloading = false;
+    ktime_get_real_ts64(&currTime);
+    for (i = 0; i < 8; i++)
+    {
+        if (Bar.tables[currTable].seats[i].occupied == true)
+        {
+            drinkingTime = currTime.tv_sec - Bar.tables[currTable].seats[i].time_sat.tv_sec;
+            switch (Bar.tables[currTable].seats[i].type)
+            {
+            case 0:
+                if (drinkingTime >= 5)
+                {
+                    Bar.tables[currTable].seats[i].occupied = false;
+                    numFreshman -= 1;
+                    currOcup -= 1;
+                    custServed++;
+                    unloading = true;
+                }
+                break;
+            case 1:
+                if (drinkingTime >= 10)
+                {
+                    Bar.tables[currTable].seats[i].occupied = false;
+                    numSophomores -= 1;
+                    currOcup -= 1;
+                    custServed++;
+                    unloading = true;
+                }
+                break;
+            case 2:
+                if (drinkingTime >= 15)
+                {
+                    Bar.tables[currTable].seats[i].occupied = false;
+                    numJuniors -= 1;
+                    currOcup -= 1;
+                    custServed++;
+                    unloading = true;
+                }
+                break;
+            case 3:
+                if (drinkingTime >= 20)
+                {
+                    Bar.tables[currTable].seats[i].occupied = false;
+                    numSeniors -= 1;
+                    currOcup -= 1;
+                    custServed++;
+                    unloading = true;
+                }
+                break;
+            case 4:
+                if (drinkingTime >= 25)
+                {
+                    Bar.tables[currTable].seats[i].occupied = false;
+                    numProfessors -= 1;
+                    currOcup -= 1;
+                    custServed++;
+                    unloading = true;
+                }
+                break;
             }
         }
     }
-    grpWaiting--;
-    list_del(temp); /* removes entry from list */
-    kfree(g);
+    if (unloading == true)
+    {
+        Waiter.state = 3;
+        ssleep(1);
+    }
+    else
+    {
+        ssleep(2);
+        Waiter.state = 5;
+        Waiter.currTable = (Waiter.currTable + 1) % 4;
+    }
+}
+void cleanTables(void)
+{
+
+    int i, j;
+    for (i = 0; i < 4; i++)
+    {
+        if (Bar.tables[i].cleanSeats < 8)
+        {
+            Waiter.state = 4;
+            Waiter.currTable = i;
+            // ssleep(10);
+            for (j = 0; j < 8; j++)
+            {
+                Bar.tables[i].seats[j].clean = true;
+            }
+        }
+        Bar.tables[i].cleanSeats = 8;
+        Waiter.state = 5;
+        ssleep(2);
+    }
+    cleanBarSeats = 32;
+}
+int elapsedTime(void)
+{
+    struct timespec64 ts;
+    time64_t elapsedSec;
+    long elapsedNano;
+    ktime_get_real_ts64(&ts);
+    elapsedSec = ts.tv_sec - initTime.tv_sec;
+    elapsedNano = ts.tv_nsec - initTime.tv_nsec;
+    if (elapsedNano < 0)
+    {
+        elapsedSec = elapsedSec - 1;
+        elapsedNano = elapsedNano + 1000000000;
+    }
+    if (closed == true)
+    {
+        return closingTime;
+    }
+
+    return elapsedSec;
 }
 
 /******************************************************************************/
 int thread_run(void *data)
 {
+    struct thread_parameter *parm = data;
 
     while (!kthread_should_stop())
     {
         if (closed == false)
         {
 
-            if (grpWaiting > 0)
+            Group *g = NULL;
+            if (!list_empty(&Bar.queue))
+                g = list_first_entry(&Bar.queue, Group, list);
+            if (grpWaiting > 0 && cleanBarSeats > g->size)
             {
+
                 Waiter.state = 3;
+                ssleep(1);
                 loadGroup();
+            }
+            else if (currOcup > 0)
+            {
+                removeGroup();
+            }
+            else if (currOcup == 0 && cleanBarSeats < 32 && Waiter.currTable == 0)
+            {
+                cleanTables();
+            }
+            else if (grpWaiting == 0 && currOcup == 0 && cleanBarSeats == 32 && closing == true)
+            {
+                Waiter.state = 1;
+                if (Waiter.currTable != 0)
+                {
+                    ssleep(2);
+                    Waiter.currTable = 0;
+                }
+                closingTime = elapsedTime();
+                closed = true;
             }
             else
             {
@@ -184,30 +363,10 @@ void thread_init_parameter(struct thread_parameter *parm)
     static int id = 1;
 
     parm->id = id++;
+    mutex_init(&parm->mutex);
     parm->kthread = kthread_run(thread_run, parm, "barstool", parm->id);
 }
 /******************************************************************************/
-
-int elapsedTime(void)
-{
-    struct timespec64 ts;
-    time64_t elapsedSec;
-    long elapsedNano;
-    ktime_get_real_ts64(&ts);
-    elapsedSec = ts.tv_sec - initTime.tv_sec;
-    elapsedNano = ts.tv_nsec - initTime.tv_nsec;
-    if (elapsedNano < 0)
-    {
-        elapsedSec = elapsedSec - 1;
-        elapsedNano = elapsedNano + 1000000000;
-    }
-    if (closed == true)
-    {
-        return closingTime;
-    }
-
-    return elapsedSec;
-}
 
 int my_initilize_bar(void)
 {
@@ -301,13 +460,6 @@ int my_close_bar(void)
     else
     {
         closing = true;
-        // check if empty
-        delete_groups();
-        grpWaiting = 0;
-        custWaiting = 0;
-        Waiter.state = 1;
-        closed = true;
-        closingTime = elapsedTime();
     }
     // printk(KERN_NOTICE "%s\n", __FUNCTION__);
     return 0;
@@ -383,6 +535,8 @@ void printTables(bar b, waiter w)
         waiterState = "MOVING";
         break;
     }
+
+    // if (mutex_lock_interruptible(&thread1.mutex) == 0) {
 
     snprintf(msg, sizeof(msg), "Waiter state: %s\n", waiterState);
     snprintf(msg + strlen(msg), sizeof(msg), "Current table: %d\n", Waiter.currTable + 1);
@@ -462,6 +616,8 @@ void printTables(bar b, waiter w)
     {
         printEmptyBar();
     }
+    // 	mutex_unlock(&thread1.mutex);
+    // }
 }
 
 static int bar_proc_open(struct inode *inode, struct file *file)
@@ -520,7 +676,7 @@ static void bar_exit(void)
     STUB_initialize_bar = NULL;
     STUB_customer_arrival = NULL;
     STUB_close_bar = NULL;
-
+    kfree(msg);
     kthread_stop(thread1.kthread); // stops thread very important
     proc_remove(proc_entry);
     return;
