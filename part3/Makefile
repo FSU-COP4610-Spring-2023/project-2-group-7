@@ -1,7 +1,8 @@
-obj-m += barstool.o
-
-all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-
+obj-y := sys_call.o
+obj-m := barstool.o
+PWD := $(shell pwd)
+KDIR := /lib/modules/`uname -r`/build
+default:
+	$(MAKE) -C $(KDIR) M=$(PWD) SUBDIRS=$(PWD) modules
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	rm -f .o.ko .mod. Module.* modules.* .mod ..cmd

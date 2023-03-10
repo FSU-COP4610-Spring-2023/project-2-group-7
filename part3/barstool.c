@@ -27,7 +27,7 @@ char msg[BUF_LEN];
 static struct proc_ops pops;
 static struct proc_dir_entry *proc_entry;
 bool opened = false;
-bool closing = false;
+bool closing = true;
 bool closed = true;
 struct timespec64 initTime;
 time64_t closingTime;
@@ -119,8 +119,8 @@ void loadGroup(void)
 {
     // list_del_head
 
-    struct list_head temp;
-    struct list_head move_list;
+    // struct list_head temp;
+    // struct list_head move_list;
     Group *g = NULL;
     struct timespec64 currTrime;
     int i, start, j;
@@ -134,9 +134,11 @@ void loadGroup(void)
         {
             if (Waiter.currTable != i)
             {
-                ssleep(2);
                 Waiter.state = 5;
                 Waiter.currTable = i;
+                mutex_unlock(&thread1.mutex);
+                ssleep(2);
+                mutex_lock_interruptible(&thread1.mutex);
             }
             Waiter.state = 3;
 
@@ -252,12 +254,16 @@ void removeGroup(void)
     if (unloading == true)
     {
         Waiter.state = 3;
+        mutex_unlock(&thread1.mutex);
         ssleep(1);
+        mutex_lock_interruptible(&thread1.mutex);
     }
     else
     {
-        ssleep(2);
         Waiter.state = 5;
+        mutex_unlock(&thread1.mutex);
+        ssleep(2);
+        mutex_lock_interruptible(&thread1.mutex);
         Waiter.currTable = (Waiter.currTable + 1) % 4;
     }
 }
@@ -271,7 +277,10 @@ void cleanTables(void)
         {
             Waiter.state = 4;
             Waiter.currTable = i;
-            // ssleep(10);
+            mutex_unlock(&thread1.mutex);
+            ssleep(10);
+            mutex_lock_interruptible(&thread1.mutex);
+
             for (j = 0; j < 8; j++)
             {
                 Bar.tables[i].seats[j].clean = true;
@@ -279,7 +288,9 @@ void cleanTables(void)
         }
         Bar.tables[i].cleanSeats = 8;
         Waiter.state = 5;
+        mutex_unlock(&thread1.mutex);
         ssleep(2);
+        mutex_lock_interruptible(&thread1.mutex);
     }
     cleanBarSeats = 32;
 }
@@ -304,55 +315,65 @@ int elapsedTime(void)
     return elapsedSec;
 }
 
-/******************************************************************************/
+/******************************************************************************!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 int thread_run(void *data)
 {
     struct thread_parameter *parm = data;
 
     while (!kthread_should_stop())
     {
-        if (closed == false)
+        if (mutex_lock_interruptible(&parm->mutex) == 0)
         {
-
-            Group *g = NULL;
-            if (!list_empty(&Bar.queue))
-                g = list_first_entry(&Bar.queue, Group, list);
-            if (grpWaiting > 0 && cleanBarSeats > g->size)
+            if (closed == false)
             {
-
-                Waiter.state = 3;
-                ssleep(1);
-                loadGroup();
-            }
-            else if (currOcup > 0)
-            {
-                removeGroup();
-            }
-            else if (currOcup == 0 && cleanBarSeats < 32 && Waiter.currTable == 0)
-            {
-                cleanTables();
-            }
-            else if (grpWaiting == 0 && currOcup == 0 && cleanBarSeats == 32 && closing == true)
-            {
-                Waiter.state = 1;
-                if (Waiter.currTable != 0)
+                Group *g = NULL;
+                if (!list_empty(&Bar.queue))
+                    g = list_first_entry(&Bar.queue, Group, list);
+                if (grpWaiting > 0 && cleanBarSeats > g->size)
                 {
-                    ssleep(2);
-                    Waiter.currTable = 0;
+
+                    Waiter.state = 3;
+                    mutex_unlock(&parm->mutex);
+                    ssleep(1);
+                    mutex_lock_interruptible(&parm->mutex);
+                    loadGroup();
                 }
-                closingTime = elapsedTime();
-                closed = true;
+                else if (currOcup > 0)
+                {
+                    removeGroup();
+                }
+                else if (currOcup == 0 && cleanBarSeats < 32 && Waiter.currTable == 0)
+                {
+                    cleanTables();
+                }
+                else if (grpWaiting == 0 && currOcup == 0 && cleanBarSeats == 32 && closing == true)
+                {
+                    Waiter.state = 1;
+                    if (Waiter.currTable != 0)
+                    {
+                        Waiter.state = 5;
+                        mutex_unlock(&parm->mutex);
+                        ssleep(2);
+                        mutex_lock_interruptible(&parm->mutex);
+                        Waiter.currTable = 0;
+                    }
+                    closingTime = elapsedTime();
+                    closed = true;
+                }
+                else
+                {
+                    Waiter.state = 5;
+                    mutex_unlock(&parm->mutex);
+                    ssleep(2);
+                    mutex_lock_interruptible(&parm->mutex);
+                    Waiter.currTable = (Waiter.currTable + 1) % 4;
+                }
             }
             else
             {
-                ssleep(2);
-                Waiter.state = 5;
-                Waiter.currTable = (Waiter.currTable + 1) % 4;
+                ssleep(1);
             }
-        }
-        else
-        {
-            ssleep(1);
+            mutex_unlock(&parm->mutex);
         }
     }
 
@@ -363,6 +384,7 @@ void thread_init_parameter(struct thread_parameter *parm)
     static int id = 1;
 
     parm->id = id++;
+
     mutex_init(&parm->mutex);
     parm->kthread = kthread_run(thread_run, parm, "barstool", parm->id);
 }
@@ -402,27 +424,31 @@ int my_initilize_bar(void)
 
 int my_customer_arrival(int number_of_customers, int type)
 {
-    if (number_of_customers > 8 || number_of_customers < 1 || type > 4 || type < 0)
-        return 1;
-
-    int group_id = 0;
-    get_random_bytes(&group_id, sizeof(group_id));
-    int size = number_of_customers;
-    int i;
-    Group *g;
-    g = kmalloc(sizeof(Group) * 1, __GFP_RECLAIM);
-
-    for (i = 0; i < number_of_customers; i++)
+    if (closing == false)
     {
-        g->cust_group[i] = type;
-    }
-    g->size = size;
-    g->group_id = group_id;
-    g->type = type;
-    list_add_tail(&g->list, &Bar.queue);
+        if (number_of_customers > 8 || number_of_customers < 1 || type > 4 || type < 0)
+            return 1;
 
-    custWaiting += number_of_customers;
-    grpWaiting += 1;
+        int group_id;
+        int size = number_of_customers;
+        int i;
+        get_random_bytes(&group_id, sizeof(group_id));
+
+        Group *g;
+        g = kmalloc(sizeof(Group) * 1, __GFP_RECLAIM);
+
+        for (i = 0; i < number_of_customers; i++)
+        {
+            g->cust_group[i] = type;
+        }
+        g->size = size;
+        g->group_id = group_id;
+        g->type = type;
+        list_add_tail(&g->list, &Bar.queue);
+
+        custWaiting += number_of_customers;
+        grpWaiting += 1;
+    }
 
     return 0;
 }
@@ -432,7 +458,7 @@ void delete_groups(void)
     struct list_head move_list;
     struct list_head *temp;
     struct list_head *dummy;
-    int i;
+    // int i;
     Group *g;
 
     INIT_LIST_HEAD(&move_list);
@@ -460,6 +486,8 @@ int my_close_bar(void)
     else
     {
         closing = true;
+        grpWaiting = 0;
+        delete_groups();
     }
     // printk(KERN_NOTICE "%s\n", __FUNCTION__);
     return 0;
@@ -536,88 +564,89 @@ void printTables(bar b, waiter w)
         break;
     }
 
-    // if (mutex_lock_interruptible(&thread1.mutex) == 0) {
+    if (mutex_lock_interruptible(&thread1.mutex) == 0)
+    {
 
-    snprintf(msg, sizeof(msg), "Waiter state: %s\n", waiterState);
-    snprintf(msg + strlen(msg), sizeof(msg), "Current table: %d\n", Waiter.currTable + 1);
-    snprintf(msg + strlen(msg), sizeof(msg), "Elapsed time: %d seconds\n", elapsedTime());
-    snprintf(msg + strlen(msg), sizeof(msg), "Current occupency: %d\n", currOcup);
-    snprintf(msg + strlen(msg), sizeof(msg), "Bar status: ");
-    if (numFreshman > 0)
-    {
-        snprintf(msg + strlen(msg), sizeof(msg), "%d F, ", numFreshman);
-    }
-    if (numSophomores > 0)
-    {
-        snprintf(msg + strlen(msg), sizeof(msg), "%d O, ", numSophomores);
-    }
-    if (numJuniors > 0)
-    {
-        snprintf(msg + strlen(msg), sizeof(msg), "%d J, ", numJuniors);
-    }
-    if (numSeniors > 0)
-    {
-        snprintf(msg + strlen(msg), sizeof(msg), "%d S, ", numSeniors);
-    }
-    if (numProfessors > 0)
-    {
-        snprintf(msg + strlen(msg), sizeof(msg), "%d P, ", numProfessors);
-    }
-
-    // need a loop that checks how many of each type
-    snprintf(msg + strlen(msg), sizeof(msg), "\nNumber of customers waiting: %d\n", custWaiting);
-    snprintf(msg + strlen(msg), sizeof(msg), "Number of groups waiting: %d\n", grpWaiting);
-    snprintf(msg + strlen(msg), sizeof(msg), "Contents of queue\n");
-    // loop to print groups
-    if (grpWaiting > 0)
-    {
-        list_for_each(temp, &Bar.queue)
+        snprintf(msg, sizeof(msg), "Waiter state: %s\n", waiterState);
+        snprintf(msg + strlen(msg), sizeof(msg), "Current table: %d\n", Waiter.currTable + 1);
+        snprintf(msg + strlen(msg), sizeof(msg), "Elapsed time: %d seconds\n", elapsedTime());
+        snprintf(msg + strlen(msg), sizeof(msg), "Current occupency: %d\n", currOcup);
+        snprintf(msg + strlen(msg), sizeof(msg), "Bar status: ");
+        if (numFreshman > 0)
         {
-            g = list_entry(temp, Group, list);
-
-            for (i = 0; i < g->size; i++)
-            {
-
-                custType = studentType(g->cust_group[i]);
-                snprintf(msg + strlen(msg), sizeof(msg), "%s ", custType);
-            }
-            snprintf(msg + strlen(msg), sizeof(msg), "(group id: %d)\n", g->group_id);
+            snprintf(msg + strlen(msg), sizeof(msg), "%d F, ", numFreshman);
         }
-    }
-
-    snprintf(msg + strlen(msg), sizeof(msg), "Number of customers serviced: %d\n", custServed);
-    snprintf(msg + strlen(msg), sizeof(msg), "\n");
-    // int i, j;
-    if (closed == false)
-    {
-        for (i = 3; i >= 0; i--)
+        if (numSophomores > 0)
         {
-            if (w.currTable == i)
-                snprintf(msg + strlen(msg), sizeof(msg),
-                         "[*] Table %d: ", i + 1);
-            else
-                snprintf(msg + strlen(msg), sizeof(msg),
-                         "[ ] Table %d: ", i + 1);
-            for (j = 0; j < 8; j++)
+            snprintf(msg + strlen(msg), sizeof(msg), "%d O, ", numSophomores);
+        }
+        if (numJuniors > 0)
+        {
+            snprintf(msg + strlen(msg), sizeof(msg), "%d J, ", numJuniors);
+        }
+        if (numSeniors > 0)
+        {
+            snprintf(msg + strlen(msg), sizeof(msg), "%d S, ", numSeniors);
+        }
+        if (numProfessors > 0)
+        {
+            snprintf(msg + strlen(msg), sizeof(msg), "%d P, ", numProfessors);
+        }
+
+        // need a loop that checks how many of each type
+        snprintf(msg + strlen(msg), sizeof(msg), "\nNumber of customers waiting: %d\n", custWaiting);
+        snprintf(msg + strlen(msg), sizeof(msg), "Number of groups waiting: %d\n", grpWaiting);
+        snprintf(msg + strlen(msg), sizeof(msg), "Contents of queue\n");
+        // loop to print groups
+        if (grpWaiting > 0)
+        {
+            list_for_each(temp, &Bar.queue)
             {
-                if (b.tables[i].seats[j].occupied == false && b.tables[i].seats[j].clean == true)
-                    seatStatus = "C";
-                else if (b.tables[i].seats[j].occupied == false && b.tables[i].seats[j].clean == false)
-                    seatStatus = "D";
+                g = list_entry(temp, Group, list);
+
+                for (i = 0; i < g->size; i++)
+                {
+
+                    custType = studentType(g->cust_group[i]);
+                    snprintf(msg + strlen(msg), sizeof(msg), "%s ", custType);
+                }
+                snprintf(msg + strlen(msg), sizeof(msg), "(group id: %d)\n", g->group_id);
+            }
+        }
+
+        snprintf(msg + strlen(msg), sizeof(msg), "Number of customers serviced: %d\n", custServed);
+        snprintf(msg + strlen(msg), sizeof(msg), "\n");
+        // int i, j;
+        if (closed == false)
+        {
+            for (i = 3; i >= 0; i--)
+            {
+                if (w.currTable == i)
+                    snprintf(msg + strlen(msg), sizeof(msg),
+                             "[*] Table %d: ", i + 1);
                 else
-                    seatStatus = studentType(b.tables[i].seats[j].type);
+                    snprintf(msg + strlen(msg), sizeof(msg),
+                             "[ ] Table %d: ", i + 1);
+                for (j = 0; j < 8; j++)
+                {
+                    if (b.tables[i].seats[j].occupied == false && b.tables[i].seats[j].clean == true)
+                        seatStatus = "C";
+                    else if (b.tables[i].seats[j].occupied == false && b.tables[i].seats[j].clean == false)
+                        seatStatus = "D";
+                    else
+                        seatStatus = studentType(b.tables[i].seats[j].type);
 
-                snprintf(msg + strlen(msg), sizeof(msg), "%s ", seatStatus);
+                    snprintf(msg + strlen(msg), sizeof(msg), "%s ", seatStatus);
+                }
+                snprintf(msg + strlen(msg), sizeof(msg), "\n");
             }
-            snprintf(msg + strlen(msg), sizeof(msg), "\n");
         }
+        else
+        {
+            printEmptyBar();
+        }
+        mutex_unlock(&thread1.mutex);
     }
-    else
-    {
-        printEmptyBar();
-    }
-    // 	mutex_unlock(&thread1.mutex);
-    // }
 }
 
 static int bar_proc_open(struct inode *inode, struct file *file)
