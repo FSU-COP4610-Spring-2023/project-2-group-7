@@ -22,7 +22,7 @@ extern int (*STUB_initialize_bar)(void);
 extern int (*STUB_customer_arrival)(int, int);
 extern int (*STUB_close_bar)(void);
 
-#define BUF_LEN 100000
+#define BUF_LEN 200000
 char msg[BUF_LEN];
 static struct proc_ops pops;
 static struct proc_dir_entry *proc_entry;
@@ -132,7 +132,7 @@ void loadGroup(void) {
 			added = true;
 		}
 	}
-	if (added = true){
+	if (added == true){
 		grpWaiting--;
 		custWaiting -= g->size;
 		currOcup += g->size;
@@ -235,25 +235,30 @@ void removeGroup(void){
 void cleanTables(void){
 
 	int i, j;
-	for (i = 0; i<4; i++){
-		if (Bar.tables[i].cleanSeats < 8){
-			Waiter.state = 4;
-			Waiter.currTable = i;
-			mutex_unlock(&thread1.mutex);
-			ssleep(10);
-			mutex_lock_interruptible(&thread1.mutex);
+	
+	if (custServed > 0)
+	{
+		for (i = 0; i<4; i++){
+			if (Bar.tables[i].cleanSeats < 8){
+				Waiter.state = 4;
+				Waiter.currTable = i;
+				mutex_unlock(&thread1.mutex);
+				ssleep(10);
+				mutex_lock_interruptible(&thread1.mutex);
 
-			for (j = 0; j<8; j++){
-					Bar.tables[i].seats[j].clean = true;
+				for (j = 0; j<8; j++){
+						Bar.tables[i].seats[j].clean = true;
+				}
 			}
-		}
-		Bar.tables[i].cleanSeats = 8;
-		Waiter.state = 5;
-		mutex_unlock(&thread1.mutex);
-		ssleep(2);
-		mutex_lock_interruptible(&thread1.mutex);
+			Bar.tables[i].cleanSeats = 8;
+			Waiter.state = 5;
+			mutex_unlock(&thread1.mutex);
+			ssleep(2);
+			mutex_lock_interruptible(&thread1.mutex);
 	}
 	cleanBarSeats = 32;
+	}
+
 }
 int elapsedTime(void)
 {
@@ -275,11 +280,37 @@ int elapsedTime(void)
 	return elapsedSec;
 }
 
+void delete_groups(void) {
+	struct list_head move_list;
+	struct list_head *temp;
+	struct list_head *dummy;
+	// int i;
+	Group *g;
+
+	INIT_LIST_HEAD(&move_list);
+
+	/* move items to a temporary list to illustrate movement */
+	list_for_each_safe(temp, dummy, &Bar.queue) { /* forwards */
+		g = list_entry(temp, Group, list);
+
+		list_move_tail(temp, &move_list); /* move to back of list */
+		
+	}
+	
+	list_for_each_safe(temp, dummy, &Bar.queue) {
+		g = list_entry(temp, Group, list);
+		list_del(temp);	/* removes entry from list */
+		kfree(g);
+	}
+	custWaiting = 0;
+	grpWaiting = 0;
+}
 /******************************************************************************!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 int thread_run(void *data)
 {
 	struct thread_parameter *parm = data;
-	
+	int i=0;
+	bool add = false;
 	while (!kthread_should_stop())
 	{
 		if (mutex_lock_interruptible(&parm->mutex) == 0) {
@@ -287,24 +318,37 @@ int thread_run(void *data)
 				Group* g = NULL;
 				if(!list_empty(&Bar.queue))
 					g = list_first_entry(&Bar.queue, Group, list);
-				if (grpWaiting > 0 && cleanBarSeats >= g->size) {
+				if (g != NULL){
+					for (i = 0; i<4; i++)
+					{
+						if (Bar.tables[i].cleanSeats >= g->size)
+							add=true;
+					}
+				}
+		
+				if (closing == true && grpWaiting > 0)
+				{
+					delete_groups();
+				}
+				else if (grpWaiting > 0 && add == true && closing == false) {
 					
 					Waiter.state = 3;
 					mutex_unlock(&parm->mutex);
 					ssleep(1);
 					mutex_lock_interruptible(&parm->mutex);
 					loadGroup();
+					
+					add = false;
 				} 
 				else if (currOcup > 0) {
 					removeGroup();
 				}
-				else if (currOcup == 0 && cleanBarSeats < 32 && Waiter.currTable == 0)
+				else if (currOcup == 0 && cleanBarSeats < 32 && Waiter.currTable == 0 && closing == false)
 				{
 					cleanTables();
 				}
-				else if (grpWaiting == 0 && currOcup == 0 && cleanBarSeats == 32 && closing == true)
+				else if (grpWaiting == 0 && currOcup == 0 && closing == true)
 				{
-					Waiter.state = 1;
 					if (Waiter.currTable != 0)
 					{
 						Waiter.state = 5;
@@ -313,7 +357,18 @@ int thread_run(void *data)
 						mutex_lock_interruptible(&parm->mutex);
 						Waiter.currTable = 0;
 					}
-					closingTime = elapsedTime();
+					if (cleanBarSeats < 32)
+						cleanTables();
+					if (Waiter.currTable != 0)
+					{
+						Waiter.state = 5;
+						mutex_unlock(&parm->mutex);
+						ssleep(2);
+						mutex_lock_interruptible(&parm->mutex);
+						Waiter.currTable = 0;
+					}
+					Waiter.state = 1;
+					
 					closed = true;
 				}
 				else{
@@ -347,9 +402,9 @@ void thread_init_parameter(struct thread_parameter *parm)
 
 int my_initilize_bar(void)
 {
-	if (Waiter.state != 1)
+	if (closed == false)
 		return 1;
-	else if (Waiter.state == 1)
+	else if (closed == true)
 	{
 		int i, j;
 		
@@ -360,6 +415,8 @@ int my_initilize_bar(void)
 		currOcup = 0;
 		closed = false;
 		closing = false;
+		cleanBarSeats = 32;
+		custServed = 0;
 		INIT_LIST_HEAD(&Bar.queue);
 		for (i = 0; i < 4; i++) 
 		{
@@ -409,39 +466,17 @@ int my_customer_arrival(int number_of_customers, int type)
 	return 0;
 }
 
-void delete_groups(void) {
-	struct list_head move_list;
-	struct list_head *temp;
-	struct list_head *dummy;
-	// int i;
-	Group *g;
 
-	INIT_LIST_HEAD(&move_list);
-
-	/* move items to a temporary list to illustrate movement */
-	list_for_each_safe(temp, dummy, &Bar.queue) { /* forwards */
-		g = list_entry(temp, Group, list);
-
-		list_move_tail(temp, &move_list); /* move to back of list */
-		
-	}
-	
-	list_for_each_safe(temp, dummy, &Bar.queue) {
-		g = list_entry(temp, Group, list);
-		list_del(temp);	/* removes entry from list */
-		kfree(g);
-	}
-}
 int my_close_bar(void)
 {
 	
 	if (closing == true)
 		return 1;
 	else {
-		closing = true;
-		grpWaiting = 0;
-		delete_groups();
-		
+			mutex_lock_interruptible(&thread1.mutex);
+			closing = true;
+			
+			mutex_unlock(&thread1.mutex);
 	}
 	// printk(KERN_NOTICE "%s\n", __FUNCTION__);
 	return 0;
@@ -523,7 +558,7 @@ void printTables(bar b, waiter w)
 		snprintf(msg, sizeof(msg), "Waiter state: %s\n", waiterState);
 		snprintf(msg + strlen(msg), sizeof(msg), "Current table: %d\n", Waiter.currTable+1);
 		snprintf(msg + strlen(msg), sizeof(msg), "Elapsed time: %d seconds\n", elapsedTime());
-		snprintf(msg + strlen(msg), sizeof(msg), "Current occupency: %d\n", currOcup);
+		snprintf(msg + strlen(msg), sizeof(msg), "Current occupancy: %d\n", currOcup);
 		snprintf(msg + strlen(msg), sizeof(msg), "Bar status: ");
 		if(numFreshman > 0)
 		{
