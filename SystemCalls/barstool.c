@@ -240,7 +240,7 @@ void cleanTables(void){
 			Waiter.state = 4;
 			Waiter.currTable = i;
 			mutex_unlock(&thread1.mutex);
-			ssleep(1);
+			ssleep(10);
 			mutex_lock_interruptible(&thread1.mutex);
 
 			for (j = 0; j<8; j++){
