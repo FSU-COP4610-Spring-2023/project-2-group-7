@@ -265,7 +265,7 @@ int elapsedTime(void)
 	struct timespec64 ts;
 	time64_t elapsedSec;
 	long elapsedNano;
-	ktime_get_real_ts64(&ts);
+	ktime_get_real_ts64(&ts); 
 	elapsedSec = ts.tv_sec - initTime.tv_sec;
 	elapsedNano = ts.tv_nsec - initTime.tv_nsec;
 	if (elapsedNano < 0) {
