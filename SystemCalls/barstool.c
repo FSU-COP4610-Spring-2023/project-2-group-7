@@ -273,7 +273,7 @@ int elapsedTime(void)
 		elapsedNano = elapsedNano + 1000000000;
 	}
 	if (closed == true)
-	{
+	{ 
 		return closingTime;
 	}
 
